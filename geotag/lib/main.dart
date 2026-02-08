@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'screens/date_picker_screen.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // Removed CameraService initialization 
   runApp(const ProActiveApp());
 }
 
@@ -15,6 +14,15 @@ class ProActiveApp extends StatelessWidget {
     return MaterialApp(
       title: 'ProActive Camera',
       debugShowCheckedModeBanner: false,
+
+      // App starts directly at Date Picker
+      initialRoute: '/date-picker',
+
+      routes: {
+        '/': (context) => const DatePickerScreen(),
+        '/date-picker': (context) => const DatePickerScreen(),
+      },
+
       theme: ThemeData(
         primarySwatch: Colors.orange,
         useMaterial3: true,
@@ -29,7 +37,10 @@ class ProActiveApp extends StatelessWidget {
             backgroundColor: Colors.orange,
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            textStyle: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -50,7 +61,6 @@ class ProActiveApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const DatePickerScreen(),
     );
   }
 }

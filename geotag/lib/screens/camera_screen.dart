@@ -2,7 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/location_service.dart';
-import '../services/image_stamp_service.dart';
+import '../models/location_data.dart';
 import 'preview_screen.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -13,7 +13,8 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen>
+    with WidgetsBindingObserver {
   CameraController? _cameraController;
   bool _isInitialized = false;
   bool _isCapturing = false;
@@ -21,37 +22,84 @@ class _CameraScreenState extends State<CameraScreen> {
   double _currentZoom = 1.0;
   double _maxZoom = 1.0;
   String? _error;
+  String _locationStatus = 'GPS: Acquiring...';
+  LocationData? _currentLocation;
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeAll();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cameraController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    if (state == AppLifecycleState.inactive) {
+      controller.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
+  }
+
+  Future<void> _initializeAll() async {
+    await _requestPermissions();
+    await _initializeCamera();
+    _acquireLocationAsync();
+  }
+
+  Future<void> _requestPermissions() async {
+    await [
+      Permission.camera,
+      Permission.location,
+      Permission.storage,
+    ].request();
+  }
+
+  void _acquireLocationAsync() {
+    LocationService.getCurrentLocation(timeout: const Duration(seconds: 15))
+        .then((location) {
+      if (!mounted) return;
+      setState(() {
+        _currentLocation = location;
+        _locationStatus = location != null ? '✓ GPS Ready' : '⚠️ GPS Issue';
+      });
+    }).catchError((_) {
+      if (mounted) {
+        setState(() => _locationStatus = '⚠️ GPS Error');
+      }
+    });
   }
 
   Future<void> _initializeCamera() async {
     try {
-      // Request permissions
-      final cameraStatus = await Permission.camera.request();
-      final locationStatus = await Permission.location.request();
+      final cameraStatus = await Permission.camera.status;
+      final locationStatus = await Permission.location.status;
 
       if (!cameraStatus.isGranted || !locationStatus.isGranted) {
         setState(() {
-          _error = 'Camera and Location permissions are required';
+          _error = 'Camera and Location permissions required';
         });
         return;
       }
 
-      // Initialize camera
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        setState(() {
-          _error = 'No cameras found on device';
-        });
+        setState(() => _error = 'No cameras found');
         return;
       }
 
       final backCamera = cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.back,
+        (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
 
@@ -62,135 +110,111 @@ class _CameraScreenState extends State<CameraScreen> {
       );
 
       await _cameraController!.initialize();
+      await _cameraController!.setFlashMode(FlashMode.off);
 
-      // Turn off flash by default
-      if (_cameraController != null) {
-        await _cameraController!.setFlashMode(FlashMode.off);
-        
-        // Get max zoom
-        final maxZoom = await _cameraController!.getMaxZoomLevel();
-        setState(() {
-          _maxZoom = maxZoom;
-          _currentZoom = 1.0;
-        });
-      }
+      _maxZoom = await _cameraController!.getMaxZoomLevel();
+      _currentZoom = 1.0;
 
       if (mounted) {
-        setState(() {
-          _isInitialized = true;
-        });
+        setState(() => _isInitialized = true);
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _error = 'Camera initialization failed: $e';
-        });
+        setState(() => _error = 'Camera init failed: $e');
       }
     }
   }
 
   Future<void> _toggleFlash() async {
-    if (_cameraController != null) {
-      try {
-        if (_flashEnabled) {
-          await _cameraController!.setFlashMode(FlashMode.off);
-        } else {
-          await _cameraController!.setFlashMode(FlashMode.always);
-        }
-        setState(() {
-          _flashEnabled = !_flashEnabled;
-        });
-      } catch (e) {
-        print('Error toggling flash: $e');
+    if (_cameraController == null) return;
+
+    try {
+      if (_flashEnabled) {
+        await _cameraController!.setFlashMode(FlashMode.off);
+      } else {
+        await _cameraController!.setFlashMode(FlashMode.always);
       }
-    }
+
+      setState(() => _flashEnabled = !_flashEnabled);
+    } catch (_) {}
   }
 
   Future<void> _setZoom(double zoom) async {
-    if (_cameraController != null && zoom >= 1.0 && zoom <= _maxZoom) {
-      try {
-        await _cameraController!.setZoomLevel(zoom);
-        setState(() {
-          _currentZoom = zoom;
-        });
-      } catch (e) {
-        print('Error setting zoom: $e');
-      }
-    }
-  }
+    if (_cameraController == null) return;
 
-  void _zoomIn() {
-    double newZoom = (_currentZoom + 0.5).clamp(1.0, _maxZoom);
-    _setZoom(newZoom);
-  }
-
-  void _zoomOut() {
-    double newZoom = (_currentZoom - 0.5).clamp(1.0, _maxZoom);
-    _setZoom(newZoom);
-  }
-
-  Future<void> _captureAndStampPhoto() async {
-    if (_isCapturing || !_isInitialized) return;
-
-    setState(() {
-      _isCapturing = true;
-    });
+    zoom = zoom.clamp(1.0, _maxZoom);
 
     try {
-      // Take photo
+      await _cameraController!.setZoomLevel(zoom);
+      setState(() => _currentZoom = zoom);
+    } catch (_) {}
+  }
+
+  void _zoomIn() => _setZoom(_currentZoom + 0.5);
+  void _zoomOut() => _setZoom(_currentZoom - 0.5);
+
+  Future<void> _capturePhoto() async {
+    if (_isCapturing || !_isInitialized || _cameraController == null) return;
+
+    setState(() => _isCapturing = true);
+
+    try {
       final XFile photo = await _cameraController!.takePicture();
 
-      // Get location
-      final location = await LocationService.getCurrentLocation();
-      if (location == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to get location')),
-          );
-        }
-        setState(() {
-          _isCapturing = false;
-        });
+      if (!mounted) {
+        setState(() => _isCapturing = false);
         return;
       }
 
-      // Stamp image
-      final stampedImageBytes = await ImageStampService.stampImage(
-        photo.path,
-        location,
-        widget.selectedDate,
+      // Get fresh location if not available
+      LocationData? location = _currentLocation;
+      if (location == null) {
+        location = await LocationService.getCurrentLocation(
+          timeout: const Duration(seconds: 10),
+        );
+      }
+
+      if (location == null) {
+        _showError('Could not acquire GPS location');
+        return;
+      }
+
+      if (!mounted) {
+        setState(() => _isCapturing = false);
+        return;
+      }
+
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PreviewScreen(
+            photoPath: photo.path,
+            location: location!,
+            selectedDate: widget.selectedDate,
+          ),
+        ),
       );
 
-      if (stampedImageBytes != null && mounted) {
-        // Use push() to keep camera screen in stack
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => PreviewScreen(imageBytes: stampedImageBytes),
-          ),
-        );
-        
-        // Reset capturing flag after navigation
-        setState(() {
-          _isCapturing = false;
-        });
+      if (mounted) {
+        setState(() => _isCapturing = false);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-        setState(() {
-          _isCapturing = false;
-        });
+        _showError('Capture error: $e');
       }
     }
   }
 
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    super.dispose();
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+    setState(() => _isCapturing = false);
   }
 
   @override
@@ -208,48 +232,25 @@ class _CameraScreenState extends State<CameraScreen> {
             icon: const Icon(Icons.arrow_back, color: Colors.black),
             onPressed: () => Navigator.pop(context),
           ),
-          title: Image.asset(
-            'assets/logo.png',
-            height: 40,
-          ),
+          title: Image.asset('assets/logo.png', height: 40),
           centerTitle: true,
           actions: [
             IconButton(
               icon: Icon(
                 _flashEnabled ? Icons.flash_on : Icons.flash_off,
                 color: _flashEnabled ? Colors.orange : Colors.black,
-                size: 28,
               ),
               onPressed: _toggleFlash,
-            ),
+            )
           ],
         ),
         body: _error != null
-            ? Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 16, color: Colors.red),
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('Back'),
-                    ),
-                  ],
-                ),
-              )
+            ? Center(child: Text(_error!, style: const TextStyle(color: Colors.red)))
             : !_isInitialized
                 ? const Center(child: CircularProgressIndicator())
                 : Stack(
                     children: [
-                      // Camera preview
                       CameraPreview(_cameraController!),
-
-                      // Date overlay (top)
                       Positioned(
                         top: 20,
                         left: 20,
@@ -263,16 +264,30 @@ class _CameraScreenState extends State<CameraScreen> {
                           child: Text(
                             'Evidence Date: ${widget.selectedDate.toIso8601String().split('T')[0]}',
                             style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
                               color: Colors.white,
+                              fontWeight: FontWeight.bold,
                             ),
                             textAlign: TextAlign.center,
                           ),
                         ),
                       ),
-
-                      // Zoom controls (right side)
+                      Positioned(
+                        top: 20,
+                        right: 20,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.8),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            _locationStatus,
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.white),
+                          ),
+                        ),
+                      ),
                       Positioned(
                         right: 20,
                         top: 120,
@@ -283,29 +298,18 @@ class _CameraScreenState extends State<CameraScreen> {
                               heroTag: 'zoom_in',
                               backgroundColor: Colors.orange,
                               onPressed: _zoomIn,
-                              child: const Icon(
-                                Icons.add,
-                                color: Colors.white,
-                                size: 24,
-                              ),
+                              child: const Icon(Icons.add),
                             ),
                             const SizedBox(height: 12),
                             Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 8,
-                              ),
+                              padding: const EdgeInsets.all(8),
                               decoration: BoxDecoration(
                                 color: Colors.black.withOpacity(0.6),
                                 borderRadius: BorderRadius.circular(8),
                               ),
                               child: Text(
                                 '${_currentZoom.toStringAsFixed(1)}x',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
+                                style: const TextStyle(color: Colors.white),
                               ),
                             ),
                             const SizedBox(height: 12),
@@ -314,53 +318,34 @@ class _CameraScreenState extends State<CameraScreen> {
                               heroTag: 'zoom_out',
                               backgroundColor: Colors.orange,
                               onPressed: _zoomOut,
-                              child: const Icon(
-                                Icons.remove,
-                                color: Colors.white,
-                                size: 24,
-                              ),
+                              child: const Icon(Icons.remove),
                             ),
                           ],
                         ),
                       ),
-
-                      // Capture button (bottom center)
                       Positioned(
                         bottom: 32,
                         left: 0,
                         right: 0,
                         child: Center(
                           child: GestureDetector(
-                            onTap: _isCapturing ? null : _captureAndStampPhoto,
+                            onTap: _isCapturing ? null : _capturePhoto,
                             child: Container(
                               width: 80,
                               height: 80,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: Colors.white,
-                                border: Border.all(
-                                  color: Colors.orange,
-                                  width: 4,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.3),
-                                    blurRadius: 8,
-                                    offset: const Offset(0, 4),
-                                  ),
-                                ],
+                                border:
+                                    Border.all(color: Colors.orange, width: 4),
                               ),
                               child: _isCapturing
                                   ? const CircularProgressIndicator(
-                                      valueColor: AlwaysStoppedAnimation<Color>(
-                                        Colors.orange,
-                                      ),
+                                      valueColor:
+                                          AlwaysStoppedAnimation(Colors.orange),
                                     )
-                                  : const Icon(
-                                      Icons.camera_alt,
-                                      size: 40,
-                                      color: Colors.orange,
-                                    ),
+                                  : const Icon(Icons.camera_alt,
+                                      size: 40, color: Colors.orange),
                             ),
                           ),
                         ),

@@ -1,48 +1,127 @@
 import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:image/image.dart' as img;
+
+import '../models/location_data.dart';
+import '../services/map_service.dart';
 import '../services/native_gallery.dart';
+import '../services/stamp_rendering_service.dart';
+import '../services/image_composite_service.dart';
+import '../widgets/stamp_overlay_widget.dart';
 
 class PreviewScreen extends StatefulWidget {
-  final Uint8List imageBytes;
+  final String photoPath;
+  final LocationData location;
+  final DateTime selectedDate;
 
   const PreviewScreen({
-    super.key,
-    required this.imageBytes,
-  });
+    Key? key,
+    required this.photoPath,
+    required this.location,
+    required this.selectedDate,
+  }) : super(key: key);
 
   @override
   State<PreviewScreen> createState() => _PreviewScreenState();
 }
 
 class _PreviewScreenState extends State<PreviewScreen> {
+  final GlobalKey _stampKey = GlobalKey();
+
+  late Future<_InitData> _initFuture;
+
   bool _saving = false;
+  bool _uiReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initFuture = _initialize();
+
+    // Ensure UI settles before allowing capture
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) setState(() => _uiReady = true);
+    });
+  }
+
+  Future<_InitData> _initialize() async {
+    final photoFile = File(widget.photoPath);
+    if (!await photoFile.exists()) {
+      throw Exception('Photo not found');
+    }
+
+    final photoBytes = await photoFile.readAsBytes();
+    final photoImage = img.decodeImage(photoBytes);
+    if (photoImage == null) {
+      throw Exception('Invalid image');
+    }
+
+    final mapBytes = await MapService.generateMapSnapshot(
+      widget.location.latitude,
+      widget.location.longitude,
+    );
+
+    return _InitData(
+      photoImage: photoImage,
+      mapBytes: mapBytes,
+    );
+  }
 
   Future<void> _saveImage() async {
+    if (_saving || !_uiReady) return;
+
     setState(() => _saving = true);
 
     try {
+      // IMPORTANT: wait for final paint before capture (fixes release failure)
+      await Future.delayed(const Duration(milliseconds: 120));
+
+      final stampPng =
+          await StampRenderingService.renderStampWidget(_stampKey);
+
+      if (stampPng == null) {
+        throw Exception('Stamp render failed');
+      }
+
+      final photoBytes = await File(widget.photoPath).readAsBytes();
+      final photoImage = img.decodeImage(photoBytes);
+      if (photoImage == null) {
+        throw Exception('Invalid photo');
+      }
+
+      final photoWidth = photoImage.width;
+
+      final compositeImage =
+          await ImageCompositeService.compositeStampOntoPhoto(
+        widget.photoPath,
+        stampPng,
+        (photoWidth * 0.92).toInt(),
+      );
+
+      if (compositeImage == null) {
+        throw Exception('Composite failed');
+      }
+
       final fileName =
           'PROACTIVE_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.jpg';
 
-      final success = await NativeGallery.saveImage(
-        widget.imageBytes,
-        fileName,
-      );
+      final success = await NativeGallery.saveImage(compositeImage, fileName);
 
       if (!mounted) return;
 
       if (success) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✓ Saved: $fileName'),
-            duration: const Duration(milliseconds: 800),
+          const SnackBar(
+            content: Text('✓ Saved'),
             backgroundColor: Colors.green,
+            duration: Duration(milliseconds: 800),
           ),
         );
 
-        // Go back to camera screen
         await Future.delayed(const Duration(milliseconds: 500));
+
         if (mounted) Navigator.pop(context);
       } else {
         throw Exception('Save failed');
@@ -52,96 +131,155 @@ class _PreviewScreenState extends State<PreviewScreen> {
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('❌ Save failed: $e'),
-          duration: const Duration(seconds: 2),
+          content: Text('Error: $e'),
           backgroundColor: Colors.red,
         ),
       );
-
-      setState(() => _saving = false);
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
+    return WillPopScope(
+      onWillPop: () async => !_saving,
+      child: Scaffold(
         backgroundColor: Colors.black,
-        elevation: 0,
-        title: const Text('Preview', style: TextStyle(color: Colors.white)),
-        centerTitle: true,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          elevation: 0,
+          title: const Text('Preview', style: TextStyle(color: Colors.white)),
+          centerTitle: true,
+          automaticallyImplyLeading: false,
         ),
-      ),
-      body: Stack(
-        children: [
-          Center(
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 4.0,
-              child: Image.memory(widget.imageBytes, fit: BoxFit.contain),
-            ),
-          ),
-          Positioned(
-            bottom: 20,
-            left: 20,
-            right: 20,
-            child: Row(
+        body: FutureBuilder<_InitData>(
+          future: _initFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Center(
+                child: CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+                ),
+              );
+            }
+
+            if (snapshot.hasError) {
+              return Center(
+                child: Text(
+                  'Error: ${snapshot.error}',
+                  style: const TextStyle(color: Colors.red),
+                ),
+              );
+            }
+
+            final data = snapshot.data!;
+
+            return Stack(
               children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _saving ? null : () => Navigator.pop(context),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey[800],
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                    icon: const Icon(Icons.camera_alt, size: 20),
-                    label: const Text(
-                      'Retake',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
+                Center(
+                  child: AspectRatio(
+                    aspectRatio:
+                        data.photoImage.width / data.photoImage.height,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.file(
+                          File(widget.photoPath),
+                          fit: BoxFit.cover,
+                        ),
+
+                        Positioned(
+                          bottom: 24,
+                          left: 24,
+                          right: 24,
+                          child: RepaintBoundary(
+                            key: _stampKey,
+                            child: StampOverlayWidget(
+                              location: widget.location,
+                              selectedDate: widget.selectedDate,
+                              mapBytes: data.mapBytes,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 2,
-                  child: ElevatedButton.icon(
-                    onPressed: _saving ? null : _saveImage,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                    icon: _saving
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor:
-                                  AlwaysStoppedAnimation(Colors.white),
+
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    color: Colors.black87,
+                    padding: const EdgeInsets.all(16),
+                    child: SafeArea(
+                      top: false,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _saving
+                                  ? null
+                                  : () => Navigator.pop(context),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.grey[700],
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 14),
+                              ),
+                              icon: const Icon(Icons.camera_alt),
+                              label: const Text('Retake'),
                             ),
-                          )
-                        : const Icon(Icons.save, size: 20),
-                    label: Text(
-                      _saving ? 'Saving...' : 'Save & Continue',
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            flex: 2,
+                            child: ElevatedButton.icon(
+                              onPressed:
+                                  (_saving || !_uiReady) ? null : _saveImage,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.orange,
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 14),
+                              ),
+                              icon: _saving
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        valueColor:
+                                            AlwaysStoppedAnimation(
+                                                Colors.white),
+                                      ),
+                                    )
+                                  : const Icon(Icons.save),
+                              label: Text(
+                                _saving ? 'Saving...' : 'Save & Continue',
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
                 ),
               ],
-            ),
-          ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }
+}
+
+class _InitData {
+  final img.Image photoImage;
+  final Uint8List? mapBytes;
+
+  _InitData({
+    required this.photoImage,
+    required this.mapBytes,
+  });
 }

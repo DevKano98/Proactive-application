@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.proactive.geotag">
 
@@ -25,6 +26,11 @@
         android:requestLegacyExternalStorage="true"
         android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="false">
+        
+        <!-- Google Play Services Library (optional, inside application tag) -->
+        <uses-library
+            android:name="com.google.android.gms.location"
+            android:required="false" />
         
         <activity
             android:name=".MainActivity"
@@ -56,6 +62,10 @@
                 android:resource="@xml/file_paths" />
         </provider>
         
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

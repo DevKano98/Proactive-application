@@ -2,7 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/location_service.dart';
-import '../services/image_stamp_service.dart';
+import '../models/location_data.dart';
 import '../screens/preview_screen.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -13,7 +13,8 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen>
+    with WidgetsBindingObserver {
   CameraController? _cameraController;
   bool _isInitialized = false;
   bool _isCapturing = false;
@@ -22,12 +23,31 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cameraController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    if (state == AppLifecycleState.inactive) {
+      controller.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
   }
 
   Future<void> _initializeCamera() async {
     try {
-      // Request permissions
       final cameraStatus = await Permission.camera.request();
       final locationStatus = await Permission.location.request();
 
@@ -38,17 +58,14 @@ class _CameraScreenState extends State<CameraScreen> {
         return;
       }
 
-      // Initialize camera
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        setState(() {
-          _error = 'No cameras found on device';
-        });
+        setState(() => _error = 'No cameras found on device');
         return;
       }
 
       final backCamera = cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.back,
+        (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
 
@@ -60,130 +77,71 @@ class _CameraScreenState extends State<CameraScreen> {
 
       await _cameraController!.initialize();
 
-      if (mounted) {
-        setState(() {
-          _isInitialized = true;
-        });
-      }
+      if (mounted) setState(() => _isInitialized = true);
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _error = 'Camera initialization failed: $e';
-        });
+        setState(() => _error = 'Camera initialization failed: $e');
       }
     }
   }
 
-  Future<void> _captureAndStampPhoto() async {
-    if (_isCapturing || !_isInitialized) return;
+  Future<void> _capturePhoto() async {
+    if (_isCapturing || !_isInitialized || _cameraController == null) return;
 
-    setState(() {
-      _isCapturing = true;
-    });
+    setState(() => _isCapturing = true);
 
     try {
-      // Take photo
       final XFile photo = await _cameraController!.takePicture();
+      if (!mounted) return;
 
-      // Get location
-      final location = await LocationService.getCurrentLocation();
+      final LocationData? location =
+          await LocationService.getCurrentLocation();
+
       if (location == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to get location')),
-          );
-        }
-        setState(() {
-          _isCapturing = false;
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not get GPS location')),
+        );
+        setState(() => _isCapturing = false);
         return;
       }
 
-      // Stamp image
-      final stampedImageBytes = await ImageStampService.stampImage(
-        photo.path,
-        location,
-        widget.selectedDate,
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PreviewScreen(
+            photoPath: photo.path,
+            location: location,
+            selectedDate: widget.selectedDate,
+          ),
+        ),
       );
 
-      if (stampedImageBytes != null && mounted) {
-        // Use push() instead of pushReplacement() so we can return to camera screen
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => PreviewScreen(imageBytes: stampedImageBytes),
-          ),
-        );
-        
-        // Reset capturing flag after navigation
-        setState(() {
-          _isCapturing = false;
-        });
-      }
+      if (mounted) setState(() => _isCapturing = false);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-        setState(() {
-          _isCapturing = false;
-        });
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+        setState(() => _isCapturing = false);
       }
     }
-  }
-
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () {
-            // Only go back if user explicitly taps back
-            // Don't go back when returning from preview
-            Navigator.pop(context);
-          },
-        ),
-        title: Image.asset(
-          'assets/logo.png',
-          height: 40,
-        ),
+        title: Image.asset('assets/logo.png', height: 40),
         centerTitle: true,
       ),
       body: _error != null
           ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    _error!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, color: Colors.red),
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Back'),
-                  ),
-                ],
-              ),
+              child: Text(_error!, style: const TextStyle(color: Colors.red)),
             )
           : !_isInitialized
               ? const Center(child: CircularProgressIndicator())
               : Stack(
                   children: [
-                    // Camera preview
                     CameraPreview(_cameraController!),
-
-                    // Date overlay
                     Positioned(
                       top: 20,
                       left: 20,
@@ -205,15 +163,13 @@ class _CameraScreenState extends State<CameraScreen> {
                         ),
                       ),
                     ),
-
-                    // Capture button
                     Positioned(
                       bottom: 32,
                       left: 0,
                       right: 0,
                       child: Center(
                         child: GestureDetector(
-                          onTap: _isCapturing ? null : _captureAndStampPhoto,
+                          onTap: _isCapturing ? null : _capturePhoto,
                           child: Container(
                             width: 80,
                             height: 80,
@@ -221,28 +177,12 @@ class _CameraScreenState extends State<CameraScreen> {
                               shape: BoxShape.circle,
                               color: Colors.white,
                               border: Border.all(
-                                color: Colors.orange,
-                                width: 4,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.3),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
+                                  color: Colors.orange, width: 4),
                             ),
                             child: _isCapturing
-                                ? const CircularProgressIndicator(
-                                    valueColor: AlwaysStoppedAnimation<Color>(
-                                      Colors.orange,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.camera_alt,
-                                    size: 40,
-                                    color: Colors.orange,
-                                  ),
+                                ? const CircularProgressIndicator()
+                                : const Icon(Icons.camera_alt,
+                                    size: 40, color: Colors.orange),
                           ),
                         ),
                       ),

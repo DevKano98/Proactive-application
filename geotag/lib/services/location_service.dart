@@ -1,101 +1,185 @@
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
-import 'package:flutter/foundation.dart';
+import 'dart:async';
 import '../models/location_data.dart';
 
 class LocationService {
-  static Future<LocationData?> getCurrentLocation() async {
-    try {
-      // Check if location service is enabled
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        if (kDebugMode) {
-          print('❌ Location service is disabled');
-        }
-        return null;
-      }
+  LocationService._();
+  static final LocationService _instance = LocationService._();
+  factory LocationService() => _instance;
 
-      // Check and request location permission
+  static final Map<String, CachedGeocodeResult> _geocodeCache = {};
+  static const Duration _cacheExpiry = Duration(minutes: 5);
+
+  static LocationData? _lastLocation;
+  static DateTime? _lastLocationTime;
+  static const Duration _locationRefreshInterval = Duration(seconds: 10);
+
+  /// MAIN LOCATION FETCH
+  static Future<LocationData?> getCurrentLocation({
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return null;
+
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
 
-      // Check if permission is granted
-      if (permission == LocationPermission.denied) {
-        if (kDebugMode) {
-          print('❌ Location permission denied');
-        }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
         return null;
       }
 
-      if (permission == LocationPermission.deniedForever) {
-        if (kDebugMode) {
-          print('❌ Location permission denied forever');
-        }
-        return null;
-      }
-
-      // Get current position with all available data
+      // Strongest GPS lock possible
       final Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.best,
-        timeLimit: const Duration(seconds: 30),
+        desiredAccuracy: LocationAccuracy.bestForNavigation,
+        timeLimit: timeout,
       );
 
-      if (kDebugMode) {
-        print('✓ Location acquired: Lat ${position.latitude}, Lon ${position.longitude}');
-        print('✓ Accuracy: ${position.accuracy}m, Speed: ${position.speed}m/s, Altitude: ${position.altitude}m');
-      }
+      final addressParts = await _getCleanAddressParts(
+        position.latitude,
+        position.longitude,
+      );
 
-      // Get address from coordinates
-      String address = 'Unknown Location';
-      try {
-        final List<Placemark> placemarks = await placemarkFromCoordinates(
-          position.latitude,
-          position.longitude,
-        );
-
-        if (placemarks.isNotEmpty) {
-          final Placemark p = placemarks[0];
-          final street = p.street ?? '';
-          final locality = p.locality ?? '';
-          final country = p.country ?? '';
-
-          address =
-              '$street, $locality, $country'.replaceAll(RegExp(r',\s*,'), ',').trim();
-
-          if (address.isEmpty || address == ',' || address == ', ,') {
-            address = 'Location: ${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}';
-          }
-          
-          if (kDebugMode) {
-            print('✓ Address: $address');
-          }
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          print('⚠ Geocoding error: $e');
-        }
-        address = 'Lat: ${position.latitude.toStringAsFixed(6)}, Lon: ${position.longitude.toStringAsFixed(6)}';
-      }
-
-      return LocationData(
+      final locationData = LocationData(
         latitude: position.latitude,
         longitude: position.longitude,
-        altitude: position.altitude,
-        accuracy: position.accuracy,
-        speed: position.speed,
         timestamp: DateTime.now(),
-        address: address,
-        // These would require additional sensors/APIs
-        humidity: null,
-        temperature: null,
+        shortAddress: addressParts.shortAddress,
+        fullAddress: addressParts.fullAddress,
       );
+
+      _lastLocation = locationData;
+      _lastLocationTime = DateTime.now();
+
+      return locationData;
     } catch (e) {
-      if (kDebugMode) {
-        print('❌ Location service error: $e');
-      }
+      if (kDebugMode) print("Location error: $e");
       return null;
     }
   }
+
+  /// FAST CACHE ACCESS
+  static LocationData? getLastKnownLocation() {
+    if (_lastLocation != null &&
+        _lastLocationTime != null &&
+        DateTime.now().difference(_lastLocationTime!) <
+            _locationRefreshInterval) {
+      return _lastLocation;
+    }
+    return null;
+  }
+
+  /// CLEAN ADDRESS GENERATOR
+  static Future<AddressParts> _getCleanAddressParts(
+    double lat,
+    double lon,
+  ) async {
+    try {
+      final cacheKey =
+          '${lat.toStringAsFixed(4)}_${lon.toStringAsFixed(4)}';
+
+      if (_geocodeCache.containsKey(cacheKey)) {
+        final cached = _geocodeCache[cacheKey]!;
+        if (DateTime.now().difference(cached.timestamp) < _cacheExpiry) {
+          return cached.parts;
+        } else {
+          _geocodeCache.remove(cacheKey);
+        }
+      }
+
+      final placemarks =
+          await placemarkFromCoordinates(lat, lon)
+              .timeout(const Duration(seconds: 8));
+
+      if (placemarks.isEmpty) {
+        return _fallbackParts(lat, lon);
+      }
+
+      final p = placemarks.first;
+
+      final city = p.locality ?? '';
+      final state = p.administrativeArea ?? '';
+      final country = p.country ?? '';
+
+      final street = p.street ?? '';
+      final subLocality = p.subLocality ?? '';
+
+      final shortAddress = [
+        city,
+        state,
+        country
+      ].where((e) => e.isNotEmpty).join(', ');
+
+      final fullAddress = [
+        street,
+        subLocality,
+        city,
+        state,
+        country
+      ].where((e) => e.isNotEmpty).join(', ');
+
+      final parts = AddressParts(
+        shortAddress: shortAddress.isEmpty
+            ? 'Unknown Location'
+            : shortAddress,
+        fullAddress: fullAddress.isEmpty
+            ? shortAddress
+            : fullAddress,
+      );
+
+      _geocodeCache[cacheKey] = CachedGeocodeResult(
+        parts: parts,
+        timestamp: DateTime.now(),
+      );
+
+      return parts;
+    } catch (e) {
+      if (kDebugMode) print("Geocode error: $e");
+      return _fallbackParts(lat, lon);
+    }
+  }
+
+  static AddressParts _fallbackParts(double lat, double lon) {
+    final coords =
+        'Lat ${lat.toStringAsFixed(6)}, Lon ${lon.toStringAsFixed(6)}';
+
+    return AddressParts(
+      shortAddress: 'Unknown Location',
+      fullAddress: coords,
+    );
+  }
+
+  static void clearGeocodeCache() {
+    _geocodeCache.clear();
+  }
+
+  static void dispose() {
+    _geocodeCache.clear();
+  }
+}
+
+/// CLEAN STRUCT FOR ADDRESS
+class AddressParts {
+  final String shortAddress;
+  final String fullAddress;
+
+  AddressParts({
+    required this.shortAddress,
+    required this.fullAddress,
+  });
+}
+
+class CachedGeocodeResult {
+  final AddressParts parts;
+  final DateTime timestamp;
+
+  CachedGeocodeResult({
+    required this.parts,
+    required this.timestamp,
+  });
 }
