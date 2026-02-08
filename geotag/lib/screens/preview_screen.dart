@@ -40,9 +40,14 @@ class _PreviewScreenState extends State<PreviewScreen> {
     super.initState();
     _initFuture = _initialize();
 
-    // Ensure UI settles before allowing capture
-    Future.delayed(const Duration(milliseconds: 300), () {
-      if (mounted) setState(() => _uiReady = true);
+    // Mark UI ready ONLY after widget is fully built and painted
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Wait one more frame to ensure map image is painted
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() => _uiReady = true);
+        }
+      });
     });
   }
 
@@ -58,6 +63,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
       throw Exception('Invalid image');
     }
 
+    // Pre-load map image so it's painted before buttons appear
     final mapBytes = await MapService.generateMapSnapshot(
       widget.location.latitude,
       widget.location.longitude,
@@ -75,8 +81,8 @@ class _PreviewScreenState extends State<PreviewScreen> {
     setState(() => _saving = true);
 
     try {
-      // IMPORTANT: wait for final paint before capture (fixes release failure)
-      await Future.delayed(const Duration(milliseconds: 120));
+      // Extra wait before final render
+      await Future.delayed(const Duration(milliseconds: 50));
 
       final stampPng =
           await StampRenderingService.renderStampWidget(_stampKey);
@@ -207,60 +213,69 @@ class _PreviewScreenState extends State<PreviewScreen> {
                   ),
                 ),
 
+                // Buttons appear ONLY when UI is fully ready
                 Positioned(
                   bottom: 0,
                   left: 0,
                   right: 0,
-                  child: Container(
-                    color: Colors.black87,
-                    padding: const EdgeInsets.all(16),
-                    child: SafeArea(
-                      top: false,
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: _saving
-                                  ? null
-                                  : () => Navigator.pop(context),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.grey[700],
-                                padding: const EdgeInsets.symmetric(
-                                    vertical: 14),
+                  child: AnimatedOpacity(
+                    opacity: _uiReady ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 300),
+                    child: IgnorePointer(
+                      ignoring: !_uiReady,
+                      child: Container(
+                        color: Colors.black87,
+                        padding: const EdgeInsets.all(16),
+                        child: SafeArea(
+                          top: false,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  onPressed: _saving
+                                      ? null
+                                      : () => Navigator.pop(context),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.grey[700],
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 14),
+                                  ),
+                                  icon: const Icon(Icons.camera_alt),
+                                  label: const Text('Retake'),
+                                ),
                               ),
-                              icon: const Icon(Icons.camera_alt),
-                              label: const Text('Retake'),
-                            ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                flex: 2,
+                                child: ElevatedButton.icon(
+                                  onPressed: (_saving || !_uiReady)
+                                      ? null
+                                      : _saveImage,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.orange,
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 14),
+                                  ),
+                                  icon: _saving
+                                      ? const SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor:
+                                                AlwaysStoppedAnimation(
+                                                    Colors.white),
+                                          ),
+                                        )
+                                      : const Icon(Icons.save),
+                                  label: Text(
+                                    _saving ? 'Saving...' : 'Save & Continue',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            flex: 2,
-                            child: ElevatedButton.icon(
-                              onPressed:
-                                  (_saving || !_uiReady) ? null : _saveImage,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.orange,
-                                padding: const EdgeInsets.symmetric(
-                                    vertical: 14),
-                              ),
-                              icon: _saving
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        valueColor:
-                                            AlwaysStoppedAnimation(
-                                                Colors.white),
-                                      ),
-                                    )
-                                  : const Icon(Icons.save),
-                              label: Text(
-                                _saving ? 'Saving...' : 'Save & Continue',
-                              ),
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                   ),

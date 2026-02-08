@@ -16,13 +16,16 @@ class LocationService {
   static DateTime? _lastLocationTime;
   static const Duration _locationRefreshInterval = Duration(seconds: 10);
 
-  /// MAIN LOCATION FETCH
+  /// MAIN LOCATION FETCH - WITH SAMSUNG FIX
   static Future<LocationData?> getCurrentLocation({
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = const Duration(seconds: 30), // Increased from 25 for Samsung
   }) async {
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return null;
+      if (!serviceEnabled) {
+        if (kDebugMode) print("Location service disabled");
+        return null;
+      }
 
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -31,14 +34,21 @@ class LocationService {
 
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
+        if (kDebugMode) print("Location permission denied");
         return null;
       }
 
-      // Strongest GPS lock possible
+      // SAMSUNG FIX: Use forceAndroidLocationManager
+      // This forces use of Android's native location manager instead of Samsung's layer
       final Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.bestForNavigation,
+        desiredAccuracy: LocationAccuracy.high, // Changed from bestForNavigation
         timeLimit: timeout,
+        forceAndroidLocationManager: true, // ← KEY FIX FOR SAMSUNG
       );
+
+      if (kDebugMode) {
+        print("✓ GPS Position acquired: ${position.latitude}, ${position.longitude}");
+      }
 
       final addressParts = await _getCleanAddressParts(
         position.latitude,
@@ -58,7 +68,7 @@ class LocationService {
 
       return locationData;
     } catch (e) {
-      if (kDebugMode) print("Location error: $e");
+      if (kDebugMode) print("❌ Location error: $e");
       return null;
     }
   }

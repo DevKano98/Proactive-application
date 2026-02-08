@@ -9,28 +9,34 @@ class StampRenderingService {
       final context = key.currentContext;
       if (context == null) return null;
 
-      // Wait for layout + paint to finish
-      await WidgetsBinding.instance.endOfFrame;
-      await Future.delayed(const Duration(milliseconds: 40));
-      await WidgetsBinding.instance.endOfFrame;
-
       final boundary = context.findRenderObject() as RenderRepaintBoundary?;
-
       if (boundary == null) return null;
 
-      // If still painting, wait again
-      if (boundary.debugNeedsPaint) {
-        await Future.delayed(const Duration(milliseconds: 60));
-        await WidgetsBinding.instance.endOfFrame;
+      // Wait for frame completion
+      await WidgetsBinding.instance.endOfFrame;
+      
+      // GPU buffer needs time for pixelRatio: 5.0
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // Attempt with retries
+      for (int i = 0; i < 3; i++) {
+        try {
+          final ui.Image image = await boundary.toImage(pixelRatio: 5.0);
+          final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+          image.dispose();
+
+          final result = byteData?.buffer.asUint8List();
+          if (result != null && result.isNotEmpty) {
+            return result;
+          }
+        } catch (e) {
+          if (i < 2) {
+            await Future.delayed(const Duration(milliseconds: 32));
+          }
+        }
       }
 
-      final ui.Image image = await boundary.toImage(pixelRatio: 6.0);
-
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-
-      image.dispose();
-
-      return byteData?.buffer.asUint8List();
+      return null;
     } catch (e) {
       debugPrint('Stamp render error: $e');
       return null;
